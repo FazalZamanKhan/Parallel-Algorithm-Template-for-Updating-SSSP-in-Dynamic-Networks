@@ -1006,10 +1006,10 @@ To node 1003: Distance = 16, Path = 1 -> 284 -> 122 -> 37 -> 30 -> 561 -> 1003
 To node 1004: Distance = 10, Path = 1 -> 284 -> 3 -> 410 -> 39 -> 259 -> 1004
 To node 1005: Distance = 16, Path = 1 -> 284 -> 3 -> 7 -> 56 -> 1005
 To node 1006: Unreachable
-Execution time for initial SSSP: 0.002662 seconds
+Execution time for initial SSSP: 0.001 seconds
 
 Processing changes incrementally...
-Execution time for incremental updates: 1e-06 seconds
+Execution time for incremental updates: 0 seconds
 
 Final SSSP after changes:
 
@@ -2019,3 +2019,5 @@ To node 1003: Distance = 16, Path = 1 -> 284 -> 122 -> 37 -> 30 -> 561 -> 1003
 To node 1004: Distance = 10, Path = 1 -> 284 -> 3 -> 410 -> 39 -> 259 -> 1004
 To node 1005: Distance = 16, Path = 1 -> 284 -> 3 -> 7 -> 56 -> 1005
 To node 1006: Unreachable
+
+Total program execution time: 0.013 seconds

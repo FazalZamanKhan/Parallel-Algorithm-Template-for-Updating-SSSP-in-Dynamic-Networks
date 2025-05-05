@@ -153,6 +153,8 @@ void displayShortestPaths(int start_node, int nrows, const SSSPResult& result, o
 }
 
 int main(int argc, char* argv[]) {
+    clock_t total_start = clock();
+
     if (argc < 2) {
         cerr << "Usage: " << argv[0] << " <graph.mtx>\n";
         return 1;
@@ -241,6 +243,10 @@ int main(int argc, char* argv[]) {
     // Display final paths
     outfile << "\nFinal SSSP after changes:\n";
     displayShortestPaths(start_node, nrows, result, outfile);
+
+    clock_t total_end = clock();
+    double total_time = double(total_end - total_start) / CLOCKS_PER_SEC;
+    outfile << "\nTotal program execution time: " << total_time << " seconds\n";
 
     return 0;
 }
