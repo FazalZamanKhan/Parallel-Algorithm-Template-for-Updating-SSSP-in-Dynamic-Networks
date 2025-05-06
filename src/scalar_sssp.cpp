@@ -161,7 +161,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Open output file
-    ofstream outfile("output.txt");
+    ofstream outfile("../results/output1.txt");
     if (!outfile) {
         cerr << "Error opening output file for writing\n";
         return 1;
@@ -250,3 +250,12 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
+
+
+
+
+
+
+//g++ -std=c++17 -O2 -o sssp scalar_sssp.cpp
+// ./sssp ../datasets/email-Eu-core-weighted.mtx

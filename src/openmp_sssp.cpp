@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    ofstream outfile("output.txt");
+    ofstream outfile("../results/output.txt");
     if (!outfile) {
         cerr << "Error opening output file\n";
         return 1;

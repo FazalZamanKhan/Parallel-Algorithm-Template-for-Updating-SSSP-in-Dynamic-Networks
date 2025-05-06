@@ -6,6 +6,7 @@
 #include <limits>
 #include <queue>
 #include <algorithm>
+#include <set>
 
 const int INF = std::numeric_limits<int>::max();
 
@@ -14,7 +15,7 @@ struct Edge {
     int weight;
 };
 
-void read_metis_graph(const std::string& filename, std::vector<std::vector<Edge>>& adj_list, int& num_vertices, int& num_edges) {
+void read_metis_graph(const std::string& filename, std::vector<std::vector<Edge>>& adj_list, int& num_vertices) {
     std::ifstream infile(filename);
     if (!infile) {
         std::cerr << "Error opening file: " << filename << "\n";
@@ -22,17 +23,15 @@ void read_metis_graph(const std::string& filename, std::vector<std::vector<Edge>
     }
 
     std::string line;
-    // Skip comments
     while (std::getline(infile, line)) {
         if (line[0] != '%') break;
     }
 
     std::istringstream header(line);
-    int fmt = 0;
+    int num_edges, fmt = 0;
     header >> num_vertices >> num_edges >> fmt;
 
     bool isWeighted = (fmt == 1 || fmt == 10 || fmt == 11);
-
     adj_list.resize(num_vertices);
 
     for (int i = 0; i < num_vertices; ++i) {
@@ -45,136 +44,136 @@ void read_metis_graph(const std::string& filename, std::vector<std::vector<Edge>
         while (iss >> neighbor) {
             if (isWeighted) {
                 if (!(iss >> weight)) {
-                    std::cerr << "Error reading weight for edge.\n";
+                    std::cerr << "Error reading weight.\n";
                     MPI_Abort(MPI_COMM_WORLD, 1);
                 }
             } else {
                 weight = 1;
             }
-            adj_list[i].push_back({neighbor - 1, weight}); // Convert to 0-based index
+            adj_list[i].push_back({neighbor - 1, weight});
         }
     }
 }
 
-void distribute_graph(const std::vector<std::vector<Edge>>& adj_list, std::vector<std::vector<Edge>>& local_adj_list, int rank, int size) {
+void distribute_graph(const std::vector<std::vector<Edge>>& adj_list, std::vector<std::vector<Edge>>& local_adj_list, int rank, int size, int& start_idx, int& end_idx) {
     int num_vertices = adj_list.size();
     int vertices_per_proc = num_vertices / size;
     int remainder = num_vertices % size;
 
-    int start = rank * vertices_per_proc + std::min(rank, remainder);
-    int end = start + vertices_per_proc + (rank < remainder ? 1 : 0);
+    start_idx = rank * vertices_per_proc + std::min(rank, remainder);
+    end_idx = start_idx + vertices_per_proc + (rank < remainder ? 1 : 0);
 
-    local_adj_list.assign(adj_list.begin() + start, adj_list.begin() + end);
+    local_adj_list.assign(adj_list.begin() + start_idx, adj_list.begin() + end_idx);
 }
 
-void dijkstra(const std::vector<std::vector<Edge>>& local_adj_list, int global_start_vertex, int rank, int size, std::vector<int>& local_distances) {
+void apply_changes(std::vector<std::vector<Edge>>& adj_list, const std::string& changes_file) {
+    std::ifstream infile(changes_file);
+    if (!infile) {
+        std::cerr << "Error opening changes file.\n";
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    std::string line;
+    while (std::getline(infile, line)) {
+        std::istringstream iss(line);
+        char type;
+        int u, v, w;
+        if (!(iss >> type >> u >> v >> w)) continue;
+        if (type == 'I') {
+            adj_list[u].push_back({v, w});
+        } else if (type == 'D') {
+            auto& edges = adj_list[u];
+            edges.erase(std::remove_if(edges.begin(), edges.end(), [&](const Edge& e) {
+                return e.to == v && e.weight == w;
+            }), edges.end());
+        }
+    }
+}
+
+void dijkstra(const std::vector<std::vector<Edge>>& local_adj_list, int global_start_vertex, int start_idx, int end_idx, std::vector<int>& local_distances, int num_vertices, int rank, int size) {
     int local_n = local_adj_list.size();
     local_distances.assign(local_n, INF);
 
-    int num_vertices;
-    MPI_Allreduce(&local_n, &num_vertices, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-
-    int vertices_per_proc = num_vertices / size;
-    int remainder = num_vertices % size;
-
-    int start = rank * vertices_per_proc + std::min(rank, remainder);
-    int end = start + vertices_per_proc + (rank < remainder ? 1 : 0);
-
-    std::vector<bool> visited(local_n, false);
     std::vector<int> global_distances(num_vertices, INF);
+    std::vector<bool> visited(num_vertices, false);
 
-    if (global_start_vertex >= start && global_start_vertex < end) {
-        local_distances[global_start_vertex - start] = 0;
+    if (global_start_vertex >= start_idx && global_start_vertex < end_idx) {
+        local_distances[global_start_vertex - start_idx] = 0;
     }
 
     for (int i = 0; i < num_vertices; ++i) {
-        int local_min = INF;
-        int local_min_index = -1;
-
+        int local_min = INF, local_min_idx = -1;
         for (int j = 0; j < local_n; ++j) {
-            if (!visited[j] && local_distances[j] < local_min) {
+            int global_idx = j + start_idx;
+            if (!visited[global_idx] && local_distances[j] < local_min) {
                 local_min = local_distances[j];
-                local_min_index = j + start;
+                local_min_idx = global_idx;
             }
         }
 
         struct {
-            int value;
-            int rank;
-        } local_data = {local_min, (local_min_index == -1) ? -1 : rank}, global_data;
+            int dist;
+            int idx;
+        } local_data = {local_min, local_min_idx}, global_data;
 
         MPI_Allreduce(&local_data, &global_data, 1, MPI_2INT, MPI_MINLOC, MPI_COMM_WORLD);
 
-        int u = global_data.rank;
-        int u_global_index = -1;
+        if (global_data.idx == -1) break;
+        visited[global_data.idx] = true;
 
-        if (rank == global_data.rank && local_min_index != -1) {
-            u_global_index = local_min_index;
-            visited[local_min_index - start] = true;
-        }
+        int u = global_data.idx;
+        int u_dist = global_data.dist;
 
-        MPI_Bcast(&u_global_index, 1, MPI_INT, global_data.rank, MPI_COMM_WORLD);
-
-        if (u_global_index == -1) break;
-
-        int u_distance;
-        if (u_global_index >= start && u_global_index < end) {
-            u_distance = local_distances[u_global_index - start];
-        }
-        MPI_Bcast(&u_distance, 1, MPI_INT, global_data.rank, MPI_COMM_WORLD);
-
-        for (int j = 0; j < local_n; ++j) {
-            for (const auto& edge : local_adj_list[j]) {
-                if (edge.to == u_global_index) {
-                    if (local_distances[j] > u_distance + edge.weight) {
-                        local_distances[j] = u_distance + edge.weight;
+        if (u >= start_idx && u < end_idx) {
+            int local_u = u - start_idx;
+            for (const auto& edge : local_adj_list[local_u]) {
+                int v = edge.to;
+                int new_dist = u_dist + edge.weight;
+                if (v >= start_idx && v < end_idx) {
+                    int local_v = v - start_idx;
+                    if (local_distances[local_v] > new_dist) {
+                        local_distances[local_v] = new_dist;
                     }
                 }
             }
         }
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 }
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    if (argc < 3) {
-        if (rank == 0)
-            std::cerr << "Usage: mpirun -np <num_processes> ./mpi_sssp <graph_file> <source_vertex>\n";
+    double start_time = MPI_Wtime();  // Start time measurement
+
+    if (argc < 4) {
+        if (rank == 0) std::cerr << "Usage: ./mpi_sssp <metis.graph> <changes.txt> <source_vertex>\n";
         MPI_Finalize();
         return 1;
     }
 
     std::string graph_file = argv[1];
-    int source_vertex = std::stoi(argv[2]);
+    std::string changes_file = argv[2];
+    int source_vertex = std::stoi(argv[3]);
 
     std::vector<std::vector<Edge>> adj_list;
-    int num_vertices, num_edges;
+    int num_vertices;
 
     if (rank == 0) {
-        read_metis_graph(graph_file, adj_list, num_vertices, num_edges);
+        read_metis_graph(graph_file, adj_list, num_vertices);
+        apply_changes(adj_list, changes_file);
     }
 
     MPI_Bcast(&num_vertices, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (rank != 0) adj_list.resize(num_vertices);
 
-    if (rank != 0) {
-        adj_list.resize(num_vertices);
-    }
-
-    // Broadcast the adjacency list to all processes
     for (int i = 0; i < num_vertices; ++i) {
         int edge_count;
-        if (rank == 0) {
-            edge_count = adj_list[i].size();
-        }
+        if (rank == 0) edge_count = adj_list[i].size();
         MPI_Bcast(&edge_count, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            adj_list[i].resize(edge_count);
-        }
+        if (rank != 0) adj_list[i].resize(edge_count);
         for (int j = 0; j < edge_count; ++j) {
             int to, weight;
             if (rank == 0) {
@@ -190,44 +189,54 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::vector<Edge>> local_adj_list;
-    distribute_graph(adj_list, local_adj_list, rank, size);
+    int start_idx, end_idx;
+    distribute_graph(adj_list, local_adj_list, rank, size, start_idx, end_idx);
 
     std::vector<int> local_distances;
-    dijkstra(local_adj_list, source_vertex, rank, size, local_distances);
+    dijkstra(local_adj_list, source_vertex, start_idx, end_idx, local_distances, num_vertices, rank, size);
 
-    // Gather results at root process
     std::vector<int> all_distances;
-    if (rank == 0) {
-        all_distances.resize(num_vertices);
-    }
+    if (rank == 0) all_distances.resize(num_vertices);
 
-    int local_n = local_adj_list.size();
-    std::vector<int> recvcounts(size);
-    std::vector<int> displs(size);
-
-    int vertices_per_proc = num_vertices / size;
-    int remainder = num_vertices % size;
-
+    std::vector<int> recvcounts(size), displs(size);
+    int base = num_vertices / size, rem = num_vertices % size;
     for (int i = 0; i < size; ++i) {
-        recvcounts[i] = vertices_per_proc + (i < remainder ? 1 : 0);
-        displs[i] = i * vertices_per_proc + std::min(i, remainder);
+        recvcounts[i] = base + (i < rem ? 1 : 0);
+        displs[i] = i * base + std::min(i, rem);
     }
 
-    MPI_Gatherv(local_distances.data(), local_n, MPI_INT,
+    MPI_Gatherv(local_distances.data(), local_distances.size(), MPI_INT,
                 all_distances.data(), recvcounts.data(), displs.data(), MPI_INT,
                 0, MPI_COMM_WORLD);
 
+    double end_time = MPI_Wtime();  // End time measurement
+    double elapsed_time = end_time - start_time;
+
     if (rank == 0) {
-        std::cout << "Shortest distances from vertex " << source_vertex << ":\n";
-        for (int i = 0; i < num_vertices; ++i) {
-            if (all_distances[i] == INF) {
-                std::cout << "Vertex " << i << ": INF\n";
-            } else {
-                std::cout << "Vertex " << i << ": " << all_distances[i] << "\n";
+        // Output the results to output_mpi.txt
+        std::ofstream outfile("output_mpi.txt");
+        if (outfile.is_open()) {
+            outfile << "Execution Time: " << elapsed_time << " seconds\n";
+            outfile << "Final shortest distances from vertex " << source_vertex << ":\n";
+            for (int i = 0; i < num_vertices; ++i) {
+                if (all_distances[i] == INF) outfile << "Vertex " << i << ": INF\n";
+                else outfile << "Vertex " << i << ": " << all_distances[i] << "\n";
             }
+            outfile.close();
+        } else {
+            std::cerr << "Error opening output file for writing.\n";
         }
     }
 
     MPI_Finalize();
     return 0;
 }
+
+
+
+
+//COMMANDS TO RUN THE CODE :
+
+
+//mpicxx -o mpi_sssp mpi_sssp.cpp
+// mpirun -np 2 ./mpi_sssp metis.graph changes.txt 0
