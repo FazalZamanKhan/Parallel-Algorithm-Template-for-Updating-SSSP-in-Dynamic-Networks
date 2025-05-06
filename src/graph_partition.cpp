@@ -1,89 +1,130 @@
-#include <metis.h>
 #include <iostream>
-#include <fstream>
 #include <vector>
-#include <string>
-#include <sstream> 
+#include <fstream>
+#include <mpi.h>
+#include <metis.h>
+#include <cassert>
 
-int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <input_graph_file> <num_partitions> <output_part_file>\n";
-        return 1;
+struct Graph {
+    int n; // number of vertices
+    int m; // number of edges
+    std::vector<int> xadj;
+    std::vector<int> adjncy;
+    std::vector<int> weights;
+};
+
+// Read a METIS .graph file
+bool readGraph(const char* filename, Graph& graph) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return false;
     }
 
-    std::string filename = argv[1];
-    int num_parts = std::stoi(argv[2]);
-    std::string output_part_file = argv[3];
+    fscanf(file, "%d %d", &graph.n, &graph.m);
+    graph.xadj.resize(graph.n + 1);
+    graph.adjncy.resize(graph.m);
+    graph.weights.resize(graph.m);
 
-    std::ifstream infile(filename);
-    if (!infile) {
-        std::cerr << "Error opening file: " << filename << "\n";
-        return 1;
-    }
+    for (int i = 0; i < graph.n + 1; ++i)
+        fscanf(file, "%d", &graph.xadj[i]);
 
-    idx_t nVertices, nEdges, fmt = 0;
-    infile >> nVertices >> nEdges >> fmt;
+    for (int i = 0; i < graph.m; ++i)
+        fscanf(file, "%d", &graph.adjncy[i]);
 
-    bool isWeighted = (fmt == 1 || fmt == 10 || fmt == 11);
+    for (int i = 0; i < graph.m; ++i)
+        fscanf(file, "%d", &graph.weights[i]);
 
-    std::vector<idx_t> xadj(nVertices + 1);
-    std::vector<idx_t> adjncy;
-    std::vector<idx_t> adjwgt;
+    fclose(file);
 
-    std::string line;
-    std::getline(infile, line); // consume the remaining header line
+    // Correct for 1-based indexing
+    for (int& x : graph.xadj) x -= 1;
+    for (int& x : graph.adjncy) x -= 1;
 
-    idx_t edge_counter = 0;
-    for (idx_t i = 0; i < nVertices; ++i) {
-        std::getline(infile, line);
-        std::istringstream iss(line);
-        idx_t neighbor;
-        idx_t weight;
+    return true;
+}
 
-        xadj[i] = adjncy.size();
+// Partition the graph using METIS
+void partitionGraph(const Graph& graph, std::vector<int>& part, int nparts) {
+    idx_t n = graph.n;
+    idx_t ncon = 1;
+    idx_t edgecut;
 
-        while (iss >> neighbor) {
-            adjncy.push_back(neighbor - 1); // Convert to 0-based
-            if (isWeighted && iss >> weight)
-                adjwgt.push_back(weight);
-        }
-    }
-    xadj[nVertices] = adjncy.size();
+    std::vector<idx_t> xadj(graph.xadj.begin(), graph.xadj.end());
+    std::vector<idx_t> adjncy(graph.adjncy.begin(), graph.adjncy.end());
+    std::vector<idx_t> weights(graph.weights.begin(), graph.weights.end());
+    part.resize(graph.n);
 
-    std::vector<idx_t> part(nVertices);
-    idx_t objval;
+    std::vector<idx_t> partIdx(graph.n);
 
     int result = METIS_PartGraphKway(
-        &nVertices,
-        nullptr,            // ncon
+        &n,
+        &ncon,
         xadj.data(),
         adjncy.data(),
-        nullptr,            // vwgt
-        nullptr,            // vsize
-        isWeighted ? adjwgt.data() : nullptr,
-        &num_parts,
-        nullptr,            // tpwgts
-        nullptr,            // ubvec
-        nullptr,            // options
-        &objval,
-        part.data()
+        NULL,               // vertex weights
+        NULL,               // ve
+        // rtex sizes
+        weights.data(),     // edge weights
+        (idx_t*)&nparts,    // number of partitions
+        NULL,               // tpwgts
+        NULL,               // ubvec
+        NULL,               // options
+        &edgecut,
+        partIdx.data()
     );
 
     if (result != METIS_OK) {
-        std::cerr << "METIS partitioning failed.\n";
-        return 1;
+        std::cerr << "METIS partitioning failed!" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    std::ofstream outfile(output_part_file);
-    if (!outfile) {
-        std::cerr << "Error opening output file.\n";
-        return 1;
+    for (int i = 0; i < graph.n; ++i)
+        part[i] = partIdx[i];
+}
+
+// Write partitioned data to output file
+void writePartitionedGraph(const Graph& graph, const std::vector<int>& part, const char* outFilename) {
+    std::ofstream out(outFilename);
+    if (!out.is_open()) {
+        std::cerr << "Failed to open output file." << std::endl;
+        return;
     }
 
-    for (auto p : part) {
-        outfile << p << "\n";
+    out << "# NodeID PartitionID" << std::endl;
+    for (int i = 0; i < graph.n; ++i) {
+        out << i << " " << part[i] << std::endl;
     }
 
-    std::cout << "Partitioning complete. Cut edges: " << objval << "\n";
+    out.close();
+}
+
+int main(int argc, char* argv[]) {
+    MPI_Init(&argc, &argv);
+
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    Graph graph;
+    std::vector<int> part;
+
+    if (rank == 0) {
+        // Step 1: Read graph
+        if (!readGraph("metis.graph", graph)) {
+            MPI_Finalize();
+            return -1;
+        }
+
+        // Step 2: Partition graph using METIS
+        partitionGraph(graph, part, size);
+
+        // Step 3: Write partitioning results to file
+        writePartitionedGraph(graph, part, "partitioned.graph");
+
+        std::cout << "Graph partitioned into " << size << " parts. Output written to 'partitioned.graph'.\n";
+    }
+
+    MPI_Finalize();
     return 0;
 }
